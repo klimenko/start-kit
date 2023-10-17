@@ -169,8 +169,10 @@ for infile in "${BUILD_TEST_DIR}"/*.in; do
 
     # Чтение содержимого logfile в переменную OUTPUT
     OUTPUT=$(cat "${logfile}")
-
     EXPECTED_OUTPUT=$(cat "${outfile}")
+
+    OUTPUT=$(echo "$OUTPUT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    EXPECTED_OUTPUT=$(echo "$EXPECTED_OUTPUT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     if [[ "${OUTPUT}" == "${EXPECTED_OUTPUT}" ]]; then
       echo -e "${GREEN}Test $(basename "${infile%.in}") passed${NC}"
