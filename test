@@ -1,0 +1,205 @@
+#!/bin/bash
+
+set -e
+
+usage() {
+  exitcode=0
+  if [[ -n "$1" ]]; then
+    exitcode=1
+    echo "Error: $*"
+  fi
+  cat <<EOF
+usage: $0 [--no-clean] <FILE[.cpp]|TEST_FILE>
+EOF
+  exit $exitcode
+}
+
+argMaybeNoClean=
+argFile=
+
+while [[ -n $1 ]]; do
+  if [[ ${1:0:1} = - ]]; then
+    if [[ $1 = --no-clean ]]; then
+      argMaybeNoClean=1
+      shift
+    else
+      usage "Unknown option: $1"
+    fi
+  else
+    argFile=$1
+    shift
+  fi
+done
+
+if [[ -z "${argFile}" ]]; then
+  usage "file not specified"
+  exit 1
+fi
+
+GREEN='\033[0;32m'
+GREEN_BOLD='\033[1;32m'
+RED='\033[0;31m'
+RED_BOLD='\033[1;31m'
+NC='\033[0m'
+
+# Определение корневой директории проекта на основе местоположения скрипта
+ROOT_DIR=$(dirname "$(realpath "$0")")
+
+# Конвертация в абсолютный путь
+ABS_ARG_FILE=$(realpath "${argFile}")
+
+ONLY_TEST=
+
+# Проверка, если файл находится в папке tests
+if [[ "$(dirname "${ABS_ARG_FILE}")" == *"/tests" ]]; then
+    ONLY_TEST="${ABS_ARG_FILE}"
+    # Получаем имя файла без расширения (и точек)
+    BASE_NAME=$(basename "${ABS_ARG_FILE}" | awk -F. '{print $1}')
+    # Устанавливаем путь к соответствующему файлу в папке src
+    FILE="$(dirname "${ABS_ARG_FILE}")/../src/${BASE_NAME}.cpp"
+else
+    # Проверка наличия расширения .cpp
+    if [[ "${argFile}" != *.cpp ]]; then
+      FILE="${argFile}.cpp"
+    else
+      FILE="${argFile}"
+    fi
+fi
+
+# Получаем абсолютный путь к файлу
+ABS_FILE_PATH=$(realpath "${FILE}")
+
+# Проверка на существование файла
+if [[ ! -f "${FILE}" ]]; then
+    echo -e "${RED}The file $FILE does not exist. Aborting.${NC}"
+    exit 1
+fi
+
+# Получение имени задачи из пути к файлу
+TASK_NUM=$(basename "${ABS_FILE_PATH}" .cpp)
+
+# Вычисляем папку контеста на основе абсолютного пути
+CONTEST_DIR=$(echo "${ABS_FILE_PATH}" | awk -F'/' '{ if($(NF-2) != "src") print $(NF-2); else print "" }')
+
+# Cоздание папки build
+if [[ ! -d "${ROOT_DIR}/build/${CONTEST_DIR}" ]]; then
+  mkdir -p "${ROOT_DIR}/build/${CONTEST_DIR}"
+fi
+
+# Исполняемый файл
+TASK_EXE="${ROOT_DIR}/build/${CONTEST_DIR}/${TASK_NUM}"
+
+# Компиляция
+clang++ "${ABS_FILE_PATH}" -o "${TASK_EXE}"
+
+# Путь к папке с тестами
+TEST_DIR="${ROOT_DIR}/${CONTEST_DIR}/tests"
+
+# Путь к папке для временных файлов
+BUILD_TEST_DIR="${ROOT_DIR}/build/${CONTEST_DIR}/${TASK_NUM}.tests"
+
+# Создание папки для временных файлов, если она не существует
+if [[ ! -d "${BUILD_TEST_DIR}" ]]; then
+  mkdir -p "${BUILD_TEST_DIR}"
+fi
+
+# Python скрипт для разделения простых тестов
+python_script=$(cat << 'END'
+import sys
+import os
+
+input_file_path = sys.argv[1]
+output_folder = sys.argv[2]
+
+base_name = os.path.basename(input_file_path)
+
+with open(input_file_path, 'r') as f:
+    data = f.read().strip()
+
+test_cases = data.split("===")
+
+for i, test_case in enumerate(test_cases):
+    input_data, output_data = test_case.strip().split("---")
+    with open(os.path.join(output_folder, f"{base_name}.{i+1}.in"), "w") as f_in, \
+         open(os.path.join(output_folder, f"{base_name}.{i+1}.out"), "w") as f_out:
+        f_in.write(input_data.strip())
+        f_out.write(output_data.strip())
+END
+)
+
+if [[ -n "${ONLY_TEST}" ]]; then
+    if [[ "${ONLY_TEST}" == *.in || "${ONLY_TEST}" == *.out ]]; then
+      cp "${ONLY_TEST%.(in|out)}.in" "${BUILD_TEST_DIR}"
+      cp "${ONLY_TEST%.(in|out)}.out" "${BUILD_TEST_DIR}"
+    else
+      python3 -c "${python_script}" "${ONLY_TEST}" "${BUILD_TEST_DIR}"
+    fi
+else
+  # Поиск всех файлов с тестами и копирование их в временную папку
+  for file in "${TEST_DIR}/${TASK_NUM}".*; do
+    if [ "$file" == "${TEST_DIR}/${TASK_NUM}.*" ]; then
+        echo -e "${RED}No test files (${TASK_NUM}.*) found in ${TEST_DIR}/. Aborting.${NC}"
+        exit 1
+    fi
+    # Если файл заканчивается на .in или .out, копировать его в временную папку
+    if [[ "${file}" == *.in || "${file}" == *.out ]]; then
+      cp "${file}" "${BUILD_TEST_DIR}"
+    # Если файл с другим расширением, применить Python скрипт
+    else
+      python3 -c "${python_script}" "${file}" "${BUILD_TEST_DIR}"
+    fi
+  done
+fi
+
+# Счетчик для тестов
+count=0
+pass=0
+
+# Прогон тестов
+for infile in "${BUILD_TEST_DIR}"/*.in; do
+  outfile="${infile%.in}.out"
+  count=$((count + 1))
+
+  # Проверка наличия соответствующего .out файла
+  if [[ -f "${outfile}" ]]; then
+    # Запуск программы, сохранение стандартного вывода в logfile и стандартного потока ошибок в ERR_OUTPUT
+    logfile="${infile%.in}.log"
+    errfile="${infile%.in}.err"
+    ERR_OUTPUT=$("${TASK_EXE}" < "${infile}" > "${logfile}" 2>&1)
+
+    # Чтение содержимого logfile в переменную OUTPUT
+    OUTPUT=$(cat "${logfile}")
+
+    EXPECTED_OUTPUT=$(cat "${outfile}")
+
+    if [[ "${OUTPUT}" == "${EXPECTED_OUTPUT}" ]]; then
+      echo -e "${GREEN}Test $(basename "${infile%.in}") passed${NC}"
+      pass=$((pass + 1))
+    else
+      echo -e "${RED}Test $(basename "${infile%.in}") failed${NC}"
+      echo "Got     :" "${OUTPUT}"
+      echo "Expected:" "${EXPECTED_OUTPUT}"
+    fi
+    # Вывод ошибок
+    if [ -n "${ERR_OUTPUT}" ]; then
+        echo -e "${RED}Errors occurred during execution.${NC}"
+        cat "${ERR_OUTPUT}"
+        echo "${ERR_OUTPUT}" > "${errfile}"
+    fi
+  else
+    echo -e "${RED}No matching .out file for $(basename "${infile}"). Skipping.${NC}"
+  fi
+done
+
+# Вывод общего результата
+if [ "$pass" -eq "$count" ]; then
+  echo -e "${GREEN_BOLD}$pass out of $count tests passed.${NC}"
+else
+  echo -e "${RED_BOLD}$pass out of $count tests passed.${NC}"
+fi
+
+# Удаление файлов
+if [[ -z "${argMaybeNoClean}" ]]; then
+  rm "${TASK_EXE}"
+  rm -rf "${BUILD_TEST_DIR}"
+fi
