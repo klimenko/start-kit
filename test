@@ -90,7 +90,7 @@ fi
 TASK_EXE="${ROOT_DIR}/build/${CONTEST_DIR}/${TASK_NUM}"
 
 # Компиляция
-clang++ "${ABS_FILE_PATH}" -o "${TASK_EXE}"
+clang++ -std=c++11 "${ABS_FILE_PATH}" -o "${TASK_EXE}"
 
 # Путь к папке с тестами
 TEST_DIR="${ROOT_DIR}/${CONTEST_DIR}/tests"
